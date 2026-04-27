@@ -20,8 +20,51 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
-from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, BaseModelOutputWithPooling
+
+
+# ── KV Cache ───────────────────────────────────────────────────────
+
+class NaiveCache:
+    """Simple KV cache matching Bagel's NaiveCache interface.
+
+    Stores 3-D tensors ``(seq_len, kv_heads, head_dim)`` per layer,
+    identical to the format produced by the vLLM-Omni KV transfer.
+    """
+
+    def __init__(self, num_layers: int):
+        self.key_cache: dict[int, Tensor | None] = {k: None for k in range(num_layers)}
+        self.value_cache: dict[int, Tensor | None] = {k: None for k in range(num_layers)}
+
+    @property
+    def num_layers(self) -> int:
+        return len(self.key_cache)
+
+    @property
+    def seq_lens(self) -> int:
+        if self.key_cache[0] is not None:
+            return self.key_cache[0].shape[0]
+        return 0
+
+
+def _kv_seq_len(cache) -> int:
+    """Return the sequence length stored in *cache* (NaiveCache / SimpleNamespace)."""
+    if cache is None:
+        return 0
+    kc = cache.key_cache
+    first = kc[0] if isinstance(kc, (list, dict)) else None
+    return first.shape[0] if first is not None else 0
+
+
+def _crop_kv_cache(cache, n: int) -> None:
+    """Remove the last *n* tokens from every layer in *cache* (in-place)."""
+    kc = cache.key_cache
+    vc = cache.value_cache
+    indices = range(len(kc)) if isinstance(kc, list) else kc.keys()
+    for i in indices:
+        if kc[i] is not None:
+            kc[i] = kc[i][:-n]
+            vc[i] = vc[i][:-n]
 
 
 # ── Utilities ──────────────────────────────────────────────────────
@@ -1008,9 +1051,21 @@ class _Qwen2SdpaAttention(nn.Module):
             cos, sin = position_embeddings
         query_states, key_states = _qwen2_apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        # NaiveCache: read 3-D (seq, heads, dim), concat, write back.
+        # SDPA needs 4-D (batch, heads, seq, dim), so we convert at the boundary.
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            cached_k = past_key_value.key_cache[self.layer_idx]
+            if cached_k is not None:
+                # 3D→4D: (S, H, D) → (1, H, S, D)
+                past_k = cached_k.unsqueeze(0).transpose(1, 2)
+                past_v = past_key_value.value_cache[self.layer_idx].unsqueeze(0).transpose(1, 2)
+                key_states = torch.cat([past_k, key_states], dim=2)
+                value_states = torch.cat([past_v, value_states], dim=2)
+
+        if use_cache and past_key_value is not None:
+            # 4D→3D: (1, H, S, D) → (S, H, D)
+            past_key_value.key_cache[self.layer_idx] = key_states.squeeze(0).transpose(0, 1)
+            past_key_value.value_cache[self.layer_idx] = value_states.squeeze(0).transpose(0, 1)
 
         key_states = _repeat_kv(key_states, self.num_key_value_groups)
         value_states = _repeat_kv(value_states, self.num_key_value_groups)
@@ -1021,7 +1076,6 @@ class _Qwen2SdpaAttention(nn.Module):
             value_states = value_states.contiguous()
 
         is_causal = attention_mask is None and q_len > 1
-        # Critical: convert to bool mask (True = attend) matching Cheers' custom Qwen2
         causal_mask = attention_mask
         if causal_mask is not None:
             causal_mask = causal_mask.to(torch.bool).to(value_states.device)
@@ -1113,9 +1167,9 @@ class UMMTextModel(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            past_key_values = NaiveCache(len(self.layers))
         if cache_position is None:
-            past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+            past_seen = _kv_seq_len(past_key_values)
             cache_position = torch.arange(past_seen, past_seen + inputs_embeds.shape[1], device=inputs_embeds.device)
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)

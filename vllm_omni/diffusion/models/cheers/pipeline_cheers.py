@@ -35,7 +35,6 @@ import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 from transformers import AutoConfig, AutoTokenizer
-from transformers.cache_utils import DynamicCache
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -53,6 +52,8 @@ from vllm_omni.diffusion.models.cheers.cheers_modules import (
     Siglip2VisionTransformer,
     TimestepEmbedder,
     UMMTextModel,
+    _crop_kv_cache,
+    _kv_seq_len,
 )
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
@@ -284,33 +285,13 @@ class CheersGenerationPipeline(nn.Module):
         injected_kv = req.sampling_params.past_key_values
 
         if injected_kv is not None:
-            logger.info("Using injected KV Cache from AR stage")
-            if hasattr(injected_kv, "get_seq_length"):
-                past_key_values = injected_kv
-            else:
-                past_key_values = DynamicCache()
-                kc = injected_kv.key_cache
-                vc = injected_kv.value_cache
-                num_layers = len(kc) if isinstance(kc, list) else max(kc.keys()) + 1
-                num_kv_heads = self.language_model.config.num_key_value_heads
-                head_dim = self.language_model.config.hidden_size // self.language_model.config.num_attention_heads
-                for i in range(num_layers):
-                    k = kc[i].to(self.device) if kc[i] is not None else None
-                    v = vc[i].to(self.device) if vc[i] is not None else None
-                    if k is not None and v is not None:
-                        if k.dim() == 2:
-                            k = k.view(-1, num_kv_heads, head_dim).unsqueeze(0).transpose(1, 2)
-                            v = v.view(-1, num_kv_heads, head_dim).unsqueeze(0).transpose(1, 2)
-                        elif k.dim() == 3:
-                            k = k.unsqueeze(0).transpose(1, 2)
-                            v = v.unsqueeze(0).transpose(1, 2)
-                        past_key_values.update(k, v, i)
-                logger.info(
-                    "Converted KV cache: %d layers, seq_len=%d",
-                    num_layers, past_key_values.get_seq_length(),
-                )
+            past_key_values = injected_kv
+            logger.info(
+                "Using injected KV Cache from AR stage, seq_len=%d",
+                _kv_seq_len(past_key_values),
+            )
             use_cfg = False
-            seq_len = past_key_values.get_seq_length()
+            seq_len = _kv_seq_len(past_key_values)
             attention_mask = torch.ones((1, seq_len), dtype=torch.long, device=self.device)
         else:
             logger.info("Standalone diffusion mode: prefilling text prompt")
@@ -353,9 +334,9 @@ class CheersGenerationPipeline(nn.Module):
             if ti != 1 and n < num_inference_steps - 1:
                 dt = t_list[n + 1].item() - ti
                 x_t = x_t + velocity * dt
-                past_key_values.crop(-per_image_token)
+                _crop_kv_cache(past_key_values, per_image_token)
                 if use_cfg:
-                    uncond_past_key_values.crop(-per_image_token)
+                    _crop_kv_cache(uncond_past_key_values, per_image_token)
             else:
                 x_t = x_t + velocity * last_step_size
 
