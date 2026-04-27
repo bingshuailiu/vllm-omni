@@ -12,8 +12,7 @@ VAE components, and UndProjector.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -22,8 +21,8 @@ from einops import rearrange
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPast, BaseModelOutputWithPooling
 
-
 # ── KV Cache ───────────────────────────────────────────────────────
+
 
 class NaiveCache:
     """Simple KV cache matching Bagel's NaiveCache interface.
@@ -69,6 +68,7 @@ def _crop_kv_cache(cache, n: int) -> None:
 
 # ── Utilities ──────────────────────────────────────────────────────
 
+
 def _swish(x: Tensor) -> Tensor:
     return x * torch.sigmoid(x)
 
@@ -83,9 +83,7 @@ def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
     return (x * (1 + scale) + shift).to(input_dtype)
 
 
-def apply_rotary_pos_emb(
-    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor
-) -> Tuple[Tensor, Tensor]:
+def apply_rotary_pos_emb(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor]:
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
 
@@ -99,6 +97,7 @@ def apply_rotary_pos_emb(
 
 
 # ── RMSNorm ────────────────────────────────────────────────────────
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-6):
@@ -116,6 +115,7 @@ class RMSNorm(nn.Module):
 
 # ── MLP ────────────────────────────────────────────────────────────
 
+
 class MLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
@@ -130,6 +130,7 @@ class MLP(nn.Module):
 
 # ── DiT Rotary Embedding ──────────────────────────────────────────
 
+
 class DiTRotaryEmbedding(nn.Module):
     def __init__(
         self,
@@ -143,10 +144,8 @@ class DiTRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
-    def forward(self, x: Tensor, position_ids: Tensor) -> Tuple[Tensor, Tensor]:
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(
-            position_ids.shape[0], -1, 1
-        ).to(x.device)
+    def forward(self, x: Tensor, position_ids: Tensor) -> tuple[Tensor, Tensor]:
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
@@ -158,6 +157,7 @@ class DiTRotaryEmbedding(nn.Module):
 
 
 # ── DiT Attention ─────────────────────────────────────────────────
+
 
 class DiTAttention(nn.Module):
     def __init__(
@@ -174,7 +174,7 @@ class DiTAttention(nn.Module):
         self.num_heads = num_attention_heads
         self.num_kv_heads = num_key_value_heads
         self.num_key_value_groups = num_attention_heads // num_key_value_heads
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.q_proj = nn.Linear(hidden_size, num_attention_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(hidden_size, num_key_value_heads * self.head_dim, bias=False)
@@ -183,12 +183,12 @@ class DiTAttention(nn.Module):
     def forward(
         self,
         hidden_states: Tensor,
-        position_embeddings: Tuple[Tensor, Tensor],
-        attention_mask: Optional[Tensor] = None,
+        position_embeddings: tuple[Tensor, Tensor],
+        attention_mask: Tensor | None = None,
         past_key_value=None,
         cache_position=None,
         **kwargs,
-    ) -> Tuple[Tensor, Optional[Tensor]]:
+    ) -> tuple[Tensor, Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -201,9 +201,7 @@ class DiTAttention(nn.Module):
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # GQA: repeat KV heads
         if self.num_key_value_groups > 1:
@@ -211,7 +209,9 @@ class DiTAttention(nn.Module):
             value_states = value_states.repeat_interleave(self.num_key_value_groups, dim=1)
 
         attn_output = F.scaled_dot_product_attention(
-            query_states, key_states, value_states,
+            query_states,
+            key_states,
+            value_states,
             attn_mask=attention_mask,
             scale=self.scaling,
         )
@@ -221,6 +221,7 @@ class DiTAttention(nn.Module):
 
 
 # ── Modulated Attention Block (DiT block) ──────────────────────────
+
 
 class ModulatedAttentionBlock(nn.Module):
     def __init__(
@@ -254,15 +255,15 @@ class ModulatedAttentionBlock(nn.Module):
         self,
         hidden_states: Tensor,
         adaln_input: Tensor,
-        attention_mask: Optional[Tensor] = None,
+        attention_mask: Tensor | None = None,
         past_key_value=None,
         output_attentions: bool = False,
         cache_position=None,
         position_embeddings=None,
         **kwargs,
     ):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.adaLN_modulation(adaln_input).chunk(6, dim=-1)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(
+            6, dim=-1
         )
         residual = hidden_states
         hidden_states = modulate(self.input_layernorm(hidden_states), shift_msa, scale_msa)
@@ -289,6 +290,7 @@ class ModulatedAttentionBlock(nn.Module):
 
 # ── Final Layer ────────────────────────────────────────────────────
 
+
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size: int, patch_size: int, out_channels: int):
         super().__init__()
@@ -307,6 +309,7 @@ class FinalLayer(nn.Module):
 
 # ── Gen Projector (7-layer DiT) ────────────────────────────────────
 
+
 class CheersGenProjector(nn.Module):
     def __init__(
         self,
@@ -318,17 +321,21 @@ class CheersGenProjector(nn.Module):
         layers_num: int,
     ):
         super().__init__()
-        self.diffusion_head_a = nn.ModuleList([
-            ModulatedAttentionBlock(
-                hidden_size=embed_dim,
-                layer_idx=layer_idx,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-            )
-            for layer_idx in range(layers_num)
-        ])
+        self.diffusion_head_a = nn.ModuleList(
+            [
+                ModulatedAttentionBlock(
+                    hidden_size=embed_dim,
+                    layer_idx=layer_idx,
+                    num_attention_heads=num_attention_heads,
+                    num_key_value_heads=num_key_value_heads,
+                )
+                for layer_idx in range(layers_num)
+            ]
+        )
         self.diffusion_head_b = FinalLayer(
-            hidden_size=embed_dim, patch_size=patch_size, out_channels=output_dim,
+            hidden_size=embed_dim,
+            patch_size=patch_size,
+            out_channels=output_dim,
         )
         self.rotary_emb = DiTRotaryEmbedding(
             dim=embed_dim // num_attention_heads,
@@ -336,9 +343,7 @@ class CheersGenProjector(nn.Module):
             base=10000,
         )
 
-    def forward(
-        self, x: Tensor, time_embeds: Tensor, position_ids: Optional[Tensor] = None
-    ) -> Tensor:
+    def forward(self, x: Tensor, time_embeds: Tensor, position_ids: Tensor | None = None) -> Tensor:
         if position_ids is None:
             position_ids = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
         position_embeddings = self.rotary_emb(x, position_ids)
@@ -354,6 +359,7 @@ class CheersGenProjector(nn.Module):
 
 
 # ── HiGate (semantic residual fusion) ─────────────────────────────
+
 
 class HiGate(nn.Module):
     def __init__(self, embed_dim: int):
@@ -375,6 +381,7 @@ class HiGate(nn.Module):
 
 # ── Hi Projector (3-layer DiT with doubled RoPE) ──────────────────
 
+
 class CheersHiProjector(nn.Module):
     def __init__(
         self,
@@ -386,17 +393,21 @@ class CheersHiProjector(nn.Module):
         layers_num: int,
     ):
         super().__init__()
-        self.diffusion_head_a = nn.ModuleList([
-            ModulatedAttentionBlock(
-                hidden_size=embed_dim,
-                layer_idx=layer_idx,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-            )
-            for layer_idx in range(layers_num)
-        ])
+        self.diffusion_head_a = nn.ModuleList(
+            [
+                ModulatedAttentionBlock(
+                    hidden_size=embed_dim,
+                    layer_idx=layer_idx,
+                    num_attention_heads=num_attention_heads,
+                    num_key_value_heads=num_key_value_heads,
+                )
+                for layer_idx in range(layers_num)
+            ]
+        )
         self.diffusion_head_b = FinalLayer(
-            hidden_size=embed_dim, patch_size=patch_size, out_channels=output_dim,
+            hidden_size=embed_dim,
+            patch_size=patch_size,
+            out_channels=output_dim,
         )
         self.rotary_emb = DiTRotaryEmbedding(
             dim=embed_dim // num_attention_heads,
@@ -424,6 +435,7 @@ class CheersHiProjector(nn.Module):
 
 # ── Timestep Embedder (dual MLP) ──────────────────────────────────
 
+
 class TimestepEmbedder(nn.Module):
     def __init__(
         self,
@@ -447,21 +459,22 @@ class TimestepEmbedder(nn.Module):
     @staticmethod
     def timestep_embedding(t: Tensor, dim: int, max_period: float = 10000.0) -> Tensor:
         half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-        ).to(device=t.device)
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            device=t.device
+        )
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
         return embedding
 
-    def forward(self, t: Tensor, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
+    def forward(self, t: Tensor, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(dtype)
         return self.mlp_1(t_freq), self.mlp_2(t_freq)
 
 
 # ── VAE components ─────────────────────────────────────────────────
+
 
 class _AttnBlock(nn.Module):
     def __init__(self, in_channels: int):
@@ -530,8 +543,14 @@ class CheersVAEEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         ch = config.get("ch", 128) if isinstance(config, dict) else getattr(config, "ch", 128)
-        ch_mult = config.get("ch_mult", [1, 2, 4, 4]) if isinstance(config, dict) else getattr(config, "ch_mult", [1, 2, 4, 4])
-        num_res_blocks = config.get("num_res_blocks", 2) if isinstance(config, dict) else getattr(config, "num_res_blocks", 2)
+        ch_mult = (
+            config.get("ch_mult", [1, 2, 4, 4])
+            if isinstance(config, dict)
+            else getattr(config, "ch_mult", [1, 2, 4, 4])
+        )
+        num_res_blocks = (
+            config.get("num_res_blocks", 2) if isinstance(config, dict) else getattr(config, "num_res_blocks", 2)
+        )
         z_channels = config.get("z_channels", 32) if isinstance(config, dict) else getattr(config, "z_channels", 32)
         in_channels = config.get("in_channels", 3) if isinstance(config, dict) else getattr(config, "in_channels", 3)
         num_resolutions = len(ch_mult)
@@ -590,8 +609,14 @@ class CheersVAEDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         ch = config.get("ch", 128) if isinstance(config, dict) else getattr(config, "ch", 128)
-        ch_mult = config.get("ch_mult", [1, 2, 4, 4]) if isinstance(config, dict) else getattr(config, "ch_mult", [1, 2, 4, 4])
-        num_res_blocks = config.get("num_res_blocks", 2) if isinstance(config, dict) else getattr(config, "num_res_blocks", 2)
+        ch_mult = (
+            config.get("ch_mult", [1, 2, 4, 4])
+            if isinstance(config, dict)
+            else getattr(config, "ch_mult", [1, 2, 4, 4])
+        )
+        num_res_blocks = (
+            config.get("num_res_blocks", 2) if isinstance(config, dict) else getattr(config, "num_res_blocks", 2)
+        )
         z_channels = config.get("z_channels", 32) if isinstance(config, dict) else getattr(config, "z_channels", 32)
         out_ch = config.get("out_ch", 3) if isinstance(config, dict) else getattr(config, "out_ch", 3)
         num_resolutions = len(ch_mult)
@@ -654,7 +679,10 @@ class CheersVAEModel(nn.Module):
         self.ps = [2, 2]
         self.bn = nn.BatchNorm2d(
             math.prod(self.ps) * z_channels,
-            eps=1e-4, momentum=0.1, affine=False, track_running_stats=True,
+            eps=1e-4,
+            momentum=0.1,
+            affine=False,
+            track_running_stats=True,
         )
 
     def normalize(self, z: Tensor) -> Tensor:
@@ -671,16 +699,20 @@ class CheersVAEModel(nn.Module):
         moments = self.encoder(x)
         mean = torch.chunk(moments, 2, dim=1)[0]
         z = rearrange(
-            mean, "... c (i pi) (j pj) -> ... (c pi pj) i j",
-            pi=self.ps[0], pj=self.ps[1],
+            mean,
+            "... c (i pi) (j pj) -> ... (c pi pj) i j",
+            pi=self.ps[0],
+            pj=self.ps[1],
         )
         return self.normalize(z)
 
     def decode(self, z: Tensor) -> Tensor:
         z = self.inv_normalize(z)
         z = rearrange(
-            z, "... (c pi pj) i j -> ... c (i pi) (j pj)",
-            pi=self.ps[0], pj=self.ps[1],
+            z,
+            "... (c pi pj) i j -> ... c (i pi) (j pj)",
+            pi=self.ps[0],
+            pj=self.ps[1],
         )
         return self.decoder(z)
 
@@ -694,7 +726,10 @@ class CheersVAEDecoderProjector(nn.Module):
         self.ps = [2, 2]
         self.bn = nn.BatchNorm2d(
             math.prod(self.ps) * z_channels,
-            eps=1e-4, momentum=0.1, affine=False, track_running_stats=True,
+            eps=1e-4,
+            momentum=0.1,
+            affine=False,
+            track_running_stats=True,
         )
 
     def forward(self, z: Tensor) -> Tensor:
@@ -703,18 +738,21 @@ class CheersVAEDecoderProjector(nn.Module):
         m = self.bn.running_mean.view(1, -1, 1, 1)
         z = z * s + m
         z = rearrange(
-            z, "... (c pi pj) i j -> ... c (i pi) (j pj)",
-            pi=self.ps[0], pj=self.ps[1],
+            z,
+            "... (c pi pj) i j -> ... c (i pi) (j pj)",
+            pi=self.ps[0],
+            pj=self.ps[1],
         )
         return self.decoder(z)
 
 
 # ── Understanding Projector ────────────────────────────────────────
 
+
 class CheersUndProjector(nn.Module):
     """Maps SigLIP features to LLM dimension with 2x2 spatial compression."""
 
-    def __init__(self, image_embed_dim: int, text_embed_dim: int, compression_factor: Tuple[int, int] = (2, 2)):
+    def __init__(self, image_embed_dim: int, text_embed_dim: int, compression_factor: tuple[int, int] = (2, 2)):
         super().__init__()
         self.image_embed_dim = image_embed_dim
         self.text_embed_dim = text_embed_dim
@@ -732,15 +770,21 @@ class CheersUndProjector(nn.Module):
         height = width = int(x.size(1) ** 0.5)
         x = x.permute(0, 2, 1).unflatten(-1, (height, width))
         batch_size, dim, height, width = x.shape
-        unfolded = x.unfold(
-            2, self.compression_factor[0], self.compression_factor[0]
-        ).unfold(3, self.compression_factor[1], self.compression_factor[1])
+        unfolded = x.unfold(2, self.compression_factor[0], self.compression_factor[0]).unfold(
+            3, self.compression_factor[1], self.compression_factor[1]
+        )
         unfolded = unfolded.contiguous().view(
-            batch_size, dim, -1, self.compression_factor[0] * self.compression_factor[1],
+            batch_size,
+            dim,
+            -1,
+            self.compression_factor[0] * self.compression_factor[1],
         )
         unfolded = (
-            unfolded.permute(0, 2, 3, 1).contiguous().view(
-                batch_size, -1,
+            unfolded.permute(0, 2, 3, 1)
+            .contiguous()
+            .view(
+                batch_size,
+                -1,
                 dim * self.compression_factor[0] * self.compression_factor[1],
             )
         )
@@ -752,6 +796,7 @@ class CheersUndProjector(nn.Module):
 # transformers SiglipVisionModel.  Key difference: this is
 # Siglip2VisionTransformer with its own embedding, attention, and
 # layernorm scheme.
+
 
 @dataclass
 class Siglip2VisionConfig:
@@ -768,7 +813,7 @@ class Siglip2VisionConfig:
     output_hidden_states: bool = False
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Siglip2VisionConfig":
+    def from_dict(cls, d: dict) -> Siglip2VisionConfig:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -779,8 +824,9 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Conv2d(3, self.embed_dim, config.patch_size,
-                                         stride=config.patch_size, padding="valid")
+        self.patch_embedding = nn.Conv2d(
+            3, self.embed_dim, config.patch_size, stride=config.patch_size, padding="valid"
+        )
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
         self.register_buffer(
@@ -795,11 +841,12 @@ class Siglip2VisionEmbeddings(nn.Module):
         dim = embeddings.shape[-1]
         new_height = height // self.patch_size
         new_width = width // self.patch_size
-        sqrt_num_positions = int(num_positions ** 0.5)
+        sqrt_num_positions = int(num_positions**0.5)
         patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions, sqrt_num_positions, dim)
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
-        patch_pos_embed = F.interpolate(patch_pos_embed, size=(new_height, new_width),
-                                         mode="bicubic", align_corners=False)
+        patch_pos_embed = F.interpolate(
+            patch_pos_embed, size=(new_height, new_width), mode="bicubic", align_corners=False
+        )
         return patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
 
     def forward(self, pixel_values: Tensor, interpolate_pos_encoding: bool = False) -> Tensor:
@@ -820,14 +867,15 @@ class _Siglip2Attention(nn.Module):
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
-    def forward(self, hidden_states: Tensor, attention_mask: Optional[Tensor] = None,
-                output_attentions: bool = False) -> Tuple[Tensor, Optional[Tensor]]:
+    def forward(
+        self, hidden_states: Tensor, attention_mask: Tensor | None = None, output_attentions: bool = False
+    ) -> tuple[Tensor, Tensor | None]:
         bsz, seq_len, _ = hidden_states.shape
         q = self.q_proj(hidden_states).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(hidden_states).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -856,8 +904,9 @@ class _Siglip2EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = _Siglip2MLP(config)
 
-    def forward(self, hidden_states: Tensor, attention_mask: Tensor,
-                output_attentions: bool = False) -> Tuple[Tensor, ...]:
+    def forward(
+        self, hidden_states: Tensor, attention_mask: Tensor, output_attentions: bool = False
+    ) -> tuple[Tensor, ...]:
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states, attn_w = self.self_attn(hidden_states, attention_mask, output_attentions)
@@ -874,8 +923,13 @@ class _Siglip2Encoder(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([_Siglip2EncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(self, inputs_embeds: Tensor, attention_mask: Optional[Tensor] = None,
-                output_attentions: bool = False, output_hidden_states: bool = False) -> BaseModelOutput:
+    def forward(
+        self,
+        inputs_embeds: Tensor,
+        attention_mask: Tensor | None = None,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+    ) -> BaseModelOutput:
         encoder_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         hidden_states = inputs_embeds
@@ -919,18 +973,27 @@ class Siglip2VisionTransformer(nn.Module):
         self.use_head = True
         self.head = _Siglip2PoolingHead(config)
 
-    def forward(self, pixel_values: Tensor, output_attentions: Optional[bool] = None,
-                output_hidden_states: Optional[bool] = None,
-                interpolate_pos_encoding: bool = False) -> BaseModelOutputWithPooling:
+    def forward(
+        self,
+        pixel_values: Tensor,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        interpolate_pos_encoding: bool = False,
+    ) -> BaseModelOutputWithPooling:
         hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states,
-                                        output_attentions=output_attentions or False,
-                                        output_hidden_states=output_hidden_states or False)
+        encoder_outputs = self.encoder(
+            inputs_embeds=hidden_states,
+            output_attentions=output_attentions or False,
+            output_hidden_states=output_hidden_states or False,
+        )
         last_hidden_state = self.post_layernorm(encoder_outputs.last_hidden_state)
         pooler_output = self.head(last_hidden_state) if self.use_head else None
-        return BaseModelOutputWithPooling(last_hidden_state=last_hidden_state, pooler_output=pooler_output,
-                                          hidden_states=encoder_outputs.hidden_states,
-                                          attentions=encoder_outputs.attentions)
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooler_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
 
 # ── UMMTextModel (custom Qwen2 with bool-mask SDPA) ───────────────
@@ -940,6 +1003,7 @@ class Siglip2VisionTransformer(nn.Module):
 #     (no _update_causal_mask transformation)
 #   - Qwen2SdpaAttention converts mask to torch.bool before SDPA
 #     (True = attend, False = mask)
+
 
 @dataclass
 class CheersQwen2Config:
@@ -953,12 +1017,12 @@ class CheersQwen2Config:
     max_position_embeddings: int = 131072
     rms_norm_eps: float = 1e-6
     rope_theta: float = 1_000_000.0
-    rope_scaling: Optional[dict] = None
+    rope_scaling: dict | None = None
     attention_dropout: float = 0.0
-    pad_token_id: Optional[int] = None
+    pad_token_id: int | None = None
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CheersQwen2Config":
+    def from_dict(cls, d: dict) -> CheersQwen2Config:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -967,7 +1031,7 @@ def _rotate_half(x: Tensor) -> Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def _qwen2_apply_rotary_pos_emb(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> Tuple[Tensor, Tensor]:
+def _qwen2_apply_rotary_pos_emb(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> tuple[Tensor, Tensor]:
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
     return (q * cos) + (_rotate_half(q) * sin), (k * cos) + (_rotate_half(k) * sin)
@@ -990,7 +1054,7 @@ class _Qwen2RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     @torch.no_grad()
-    def forward(self, x: Tensor, position_ids: Tensor) -> Tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor, position_ids: Tensor) -> tuple[Tensor, Tensor]:
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
         device_type = x.device.type if x.device.type != "mps" else "cpu"
@@ -1034,12 +1098,17 @@ class _Qwen2SdpaAttention(nn.Module):
         self.rotary_emb = _Qwen2RotaryEmbedding(config)
 
     def forward(
-        self, hidden_states: Tensor, attention_mask: Optional[Tensor] = None,
-        position_ids: Optional[Tensor] = None, past_key_value=None,
-        output_attentions: bool = False, use_cache: bool = False,
-        cache_position: Optional[Tensor] = None,
-        position_embeddings: Optional[Tuple[Tensor, Tensor]] = None, **kwargs,
-    ) -> Tuple[Tensor, Optional[Tensor], Optional[object]]:
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        past_key_value=None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Tensor | None = None,
+        position_embeddings: tuple[Tensor, Tensor] | None = None,
+        **kwargs,
+    ) -> tuple[Tensor, Tensor | None, object | None]:
         bsz, q_len, _ = hidden_states.size()
         query_states = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
@@ -1083,8 +1152,12 @@ class _Qwen2SdpaAttention(nn.Module):
         query_states = query_states.to(value_states.dtype)
         key_states = key_states.to(value_states.dtype)
         attn_output = F.scaled_dot_product_attention(
-            query_states, key_states, value_states,
-            attn_mask=causal_mask, dropout_p=0.0, is_causal=is_causal,
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=causal_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
         )
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, self.hidden_size)
         return self.o_proj(attn_output), None, past_key_value
@@ -1111,19 +1184,29 @@ class _Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = _Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-        self, hidden_states: Tensor, attention_mask: Optional[Tensor] = None,
-        position_ids: Optional[Tensor] = None, past_key_value=None,
-        output_attentions: bool = False, use_cache: bool = False,
-        cache_position: Optional[Tensor] = None,
-        position_embeddings: Optional[Tuple[Tensor, Tensor]] = None, **kwargs,
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        past_key_value=None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Tensor | None = None,
+        position_embeddings: tuple[Tensor, Tensor] | None = None,
+        **kwargs,
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, attn_w, present_kv = self.self_attn(
-            hidden_states, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_value=past_key_value, output_attentions=output_attentions,
-            use_cache=use_cache, cache_position=cache_position,
-            position_embeddings=position_embeddings, **kwargs,
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
         )
         hidden_states = residual + hidden_states
         residual = hidden_states
@@ -1151,18 +1234,22 @@ class UMMTextModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
-        self.layers = nn.ModuleList(
-            [_Qwen2DecoderLayer(config, i) for i in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([_Qwen2DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = _Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = _Qwen2RotaryEmbedding(config)
 
     def forward(
-        self, input_ids: Optional[Tensor] = None, attention_mask: Optional[Tensor] = None,
-        position_ids: Optional[Tensor] = None, past_key_values=None,
-        inputs_embeds: Optional[Tensor] = None, use_cache: bool = False,
-        output_attentions: bool = False, output_hidden_states: bool = False,
-        cache_position: Optional[Tensor] = None, **kwargs,
+        self,
+        input_ids: Tensor | None = None,
+        attention_mask: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        past_key_values=None,
+        inputs_embeds: Tensor | None = None,
+        use_cache: bool = False,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        cache_position: Tensor | None = None,
+        **kwargs,
     ) -> BaseModelOutputWithPast:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -1187,10 +1274,15 @@ class UMMTextModel(nn.Module):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
             layer_outputs = decoder_layer(
-                hidden_states, attention_mask=causal_mask, position_ids=position_ids,
-                past_key_value=past_key_values, output_attentions=output_attentions,
-                use_cache=use_cache, cache_position=cache_position,
-                position_embeddings=position_embeddings, **kwargs,
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
             )
             hidden_states = layer_outputs[0]
             if use_cache:

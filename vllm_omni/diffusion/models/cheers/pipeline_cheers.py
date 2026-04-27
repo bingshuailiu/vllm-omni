@@ -31,10 +31,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 from torch import nn
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -43,10 +42,10 @@ from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineL
 from vllm_omni.diffusion.models.cheers.cheers_modules import (
     CheersGenProjector,
     CheersHiProjector,
+    CheersQwen2Config,
     CheersUndProjector,
     CheersVAEDecoderProjector,
     CheersVAEModel,
-    CheersQwen2Config,
     HiGate,
     Siglip2VisionConfig,
     Siglip2VisionTransformer,
@@ -75,6 +74,7 @@ class CheersGenParams:
 def get_cheers_post_process_func(od_config: OmniDiffusionConfig):
     def post_process_func(x):
         return x
+
     return post_process_func
 
 
@@ -110,6 +110,7 @@ class CheersGenerationPipeline(nn.Module):
             from vllm_omni.model_executor.model_loader.weight_utils import (
                 download_weights_from_hf_specific,
             )
+
             model_path = download_weights_from_hf_specific(model, od_config.revision, ["*"])
 
         text_config, vit_config, vae_enc_cfg, vae_dec_cfg, z_channels = _parse_config(model_path)
@@ -120,32 +121,39 @@ class CheersGenerationPipeline(nn.Module):
 
         # Tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, local_files_only=True, trust_remote_code=True,
+            model_path,
+            local_files_only=True,
+            trust_remote_code=True,
         )
 
         # Build model components using standalone modules
         self.language_model = UMMTextModel(text_config)
         self.vision_representation = Siglip2VisionTransformer(vit_config)
         self.und_projector = CheersUndProjector(
-            image_embed_dim=vit_hidden_size, text_embed_dim=llm_hidden_size,
+            image_embed_dim=vit_hidden_size,
+            text_embed_dim=llm_hidden_size,
         )
         self.vae_model = CheersVAEModel(vae_enc_cfg, vae_dec_cfg, z_channels)
         self.vae_decoder_projector = CheersVAEDecoderProjector(vae_dec_cfg, z_channels)
         self.time_embed = TimestepEmbedder(
-            hidden_size_1=llm_hidden_size, hidden_size_2=vit_hidden_size,
+            hidden_size_1=llm_hidden_size,
+            hidden_size_2=vit_hidden_size,
         )
         self.gen_projector = CheersGenProjector(
             embed_dim=llm_hidden_size,
             num_attention_heads=text_config.num_attention_heads,
             num_key_value_heads=text_config.num_key_value_heads,
-            patch_size=2, output_dim=vit_hidden_size, layers_num=7,
+            patch_size=2,
+            output_dim=vit_hidden_size,
+            layers_num=7,
         )
         self.hi_gate = HiGate(embed_dim=vit_hidden_size)
         self.hi_projector = CheersHiProjector(
             embed_dim=vit_hidden_size,
             num_attention_heads=vit_config.num_attention_heads,
             num_key_value_heads=text_config.num_key_value_heads,
-            patch_size=1, output_dim=vae_dec_cfg.get("ch", 128) if isinstance(vae_dec_cfg, dict) else getattr(vae_dec_cfg, "ch", 128),
+            patch_size=1,
+            output_dim=vae_dec_cfg.get("ch", 128) if isinstance(vae_dec_cfg, dict) else getattr(vae_dec_cfg, "ch", 128),
             layers_num=3,
         )
 
@@ -169,8 +177,9 @@ class CheersGenerationPipeline(nn.Module):
 
     def _load_pretrained_weights(self, model_path: str) -> None:
         """Load pretrained weights from safetensors files."""
-        from safetensors import safe_open
         import glob
+
+        from safetensors import safe_open
 
         safetensor_files = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
         if not safetensor_files:
@@ -193,9 +202,7 @@ class CheersGenerationPipeline(nn.Module):
         past_key_values,
     ) -> tuple[torch.Tensor, object]:
         """Single denoising step following HF Cheers._drift_fn."""
-        t_tensor = torch.full(
-            (x_t.size(0), 1), t, device=x_t.device, dtype=x_t.dtype
-        )
+        t_tensor = torch.full((x_t.size(0), 1), t, device=x_t.device, dtype=x_t.dtype)
         t_embeds_1, t_embeds_2 = self.time_embed(t_tensor.squeeze(-1), x_t.dtype)
 
         x_pixel = self.vae_decoder_projector(x_t)
@@ -223,9 +230,7 @@ class CheersGenerationPipeline(nn.Module):
             output_hidden_states=True,
         )
 
-        image_feature_pre = step_output.last_hidden_state[
-            :, -projected_image_feature.size(1):, :
-        ]
+        image_feature_pre = step_output.last_hidden_state[:, -projected_image_feature.size(1) :, :]
 
         drift = self.gen_projector(image_feature_pre, t_embeds_1)
 
@@ -294,7 +299,10 @@ class CheersGenerationPipeline(nn.Module):
         else:
             logger.info("Standalone diffusion mode: prefilling text prompt")
             past_key_values, attention_mask, use_cfg = self._standalone_prefill(
-                prompt, gen_params, image_h, image_w,
+                prompt,
+                gen_params,
+                image_h,
+                image_w,
             )
             if use_cfg:
                 uncond_past_key_values = self._uncond_kv_cache
@@ -325,7 +333,10 @@ class CheersGenerationPipeline(nn.Module):
 
             if use_cfg:
                 uncond_velocity, uncond_step_output = self._drift_fn(
-                    x_t, ti, attention_mask, uncond_past_key_values,
+                    x_t,
+                    ti,
+                    attention_mask,
+                    uncond_past_key_values,
                 )
                 velocity = uncond_velocity + gen_params.cfg_scale * (velocity - uncond_velocity)
 
@@ -347,14 +358,20 @@ class CheersGenerationPipeline(nn.Module):
         return DiffusionOutput(output=pil_image)
 
     def _standalone_prefill(
-        self, prompt: str, gen_params: CheersGenParams, image_h: int, image_w: int,
+        self,
+        prompt: str,
+        gen_params: CheersGenParams,
+        image_h: int,
+        image_w: int,
     ) -> tuple[object, torch.Tensor, bool]:
         """Replicate HF Cheers model's T2I prefill: tokenize + LLM forward + build KV cache."""
         messages = [{"role": "user", "content": prompt}]
 
         # Build input_ids using tokenizer chat template
         text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
         )
         input_ids = self.tokenizer(text, return_tensors="pt")["input_ids"].to(self.device)
 
@@ -365,9 +382,7 @@ class CheersGenerationPipeline(nn.Module):
         total_len = img_len + txt_len
         head_num = self.language_model.config.num_attention_heads
 
-        omni_mask = torch.tril(
-            torch.ones((1, head_num, total_len, total_len), dtype=torch.long, device=self.device)
-        )
+        omni_mask = torch.tril(torch.ones((1, head_num, total_len, total_len), dtype=torch.long, device=self.device))
 
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
@@ -430,7 +445,7 @@ class CheersGenerationPipeline(nn.Module):
         def _normalize(name: str) -> str:
             for pfx_src, pfx_dst in _prefix_map.items():
                 if name.startswith(pfx_src):
-                    return pfx_dst + name[len(pfx_src):]
+                    return pfx_dst + name[len(pfx_src) :]
             return name
 
         for orig_name, tensor in weights:
@@ -442,7 +457,9 @@ class CheersGenerationPipeline(nn.Module):
             if expected_shape and tuple(tensor.shape) != expected_shape:
                 logger.warning(
                     "Shape mismatch for %s: expected %s, got %s; skipping",
-                    name, expected_shape, tuple(tensor.shape),
+                    name,
+                    expected_shape,
+                    tuple(tensor.shape),
                 )
                 skipped.add(orig_name)
                 continue

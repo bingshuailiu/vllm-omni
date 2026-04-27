@@ -11,7 +11,6 @@ Multi-prompt from file (one prompt per line):
 
 import argparse
 import os
-import sys
 
 
 def parse_args():
@@ -48,11 +47,11 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     from vllm_omni.diffusion.data import OmniDiffusionConfig
-    from vllm_omni.diffusion.request import OmniDiffusionRequest
-    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
     from vllm_omni.diffusion.models.cheers.pipeline_cheers import (
         CheersGenerationPipeline,
     )
+    from vllm_omni.diffusion.request import OmniDiffusionRequest
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     prompts: list[str] = []
     if args.txt_prompts:
@@ -85,7 +84,7 @@ def main():
         output = pipeline.forward(req)
         save_path = os.path.join(args.output, f"output_{i}.png")
         output.output.save(save_path)
-        print(f"[{i+1}/{len(prompts)}] Saved: {save_path}  prompt: {prompt[:60]}")
+        print(f"[{i + 1}/{len(prompts)}] Saved: {save_path}  prompt: {prompt[:60]}")
 
     print("Done.")
 
