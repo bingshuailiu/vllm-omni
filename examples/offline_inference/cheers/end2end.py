@@ -67,6 +67,7 @@ def main():
 
     od_config = OmniDiffusionConfig(model=args.model, revision=None)
     pipeline = CheersGenerationPipeline(od_config=od_config)
+    pipeline._load_pretrained_weights(pipeline.model_path)
 
     for i, prompt in enumerate(prompts):
         sampling_params = OmniDiffusionSamplingParams(

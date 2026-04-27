@@ -152,6 +152,7 @@ class CheersGenerationPipeline(nn.Module):
         self.latent_channels = latent_channels
         self.llm_hidden_size = llm_hidden_size
         self.vit_hidden_size = vit_hidden_size
+        self.model_path = model_path
 
         # Weight sources for vLLM-Omni loader
         self.weights_sources = [
@@ -164,10 +165,7 @@ class CheersGenerationPipeline(nn.Module):
             )
         ]
 
-        self.to(device=self.device, dtype=torch.bfloat16)
-
-        # Load pretrained weights from safetensors
-        self._load_pretrained_weights(model_path)
+        self.to(device=self.device, dtype=self.od_config.dtype)
 
     def _load_pretrained_weights(self, model_path: str) -> None:
         """Load pretrained weights from safetensors files."""
